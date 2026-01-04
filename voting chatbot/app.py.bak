@@ -1,0 +1,247 @@
+# Save this as app.py
+from flask import Flask, render_template, request, jsonify, session
+import sqlite3
+from datetime import datetime, timedelta
+import hashlib
+import re
+import os
+
+app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'
+
+class VotingSystem:
+    def __init__(self):
+        self.setup_database()
+    
+    def setup_database(self):
+        self.conn = sqlite3.connect('voting.db', check_same_thread=False)
+        cursor = self.conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                password_hash TEXT,
+                has_voted BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                candidate_id INTEGER,
+                voted_at DATETIME
+            )
+        ''')
+        
+        # Insert sample candidates
+        cursor.execute("SELECT COUNT(*) FROM votes")
+        self.conn.commit()
+    
+    def hash_password(self, password):
+        return hashlib.sha256(password.encode()).hexdigest()
+
+voting_system = VotingSystem()
+
+@app.route('/')
+def index():
+    return render_template('chatbot.html')
+
+@app.route('/send_message', methods=['POST'])
+def send_message():
+    user_message = request.json['message']
+    response = process_message(user_message, session)
+    return jsonify({'response': response})
+
+def process_message(message, session):
+    message = message.lower().strip()
+    
+    # Handle multi-turn states first
+    state = session.get('state')
+    
+    if state == 'registering':
+        parts = message.split()
+        if len(parts) < 2:
+            session.pop('state', None)
+            return "❌ Invalid format. Use: username password. Type 'register' to try again."
+        username = parts[0]
+        password = ' '.join(parts[1:])
+        password_hash = voting_system.hash_password(password)
+        
+        cursor = voting_system.conn.cursor()
+        try:
+            cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
+            voting_system.conn.commit()
+            session.pop('state', None)
+            return f"✅ Registered successfully! You can now login with username: {username}"
+        except sqlite3.IntegrityError:
+            session.pop('state', None)
+            return "❌ Username already exists. Please choose another one. Type 'register' to try again."
+        except Exception as e:
+            session.pop('state', None)
+            return f"❌ Error during registration: {str(e)}"
+    
+    elif state == 'logging_in':
+        parts = message.split()
+        if len(parts) < 2:
+            session.pop('state', None)
+            return "❌ Invalid format. Use: username password. Type 'login' to try again."
+        username = parts[0]
+        password = ' '.join(parts[1:])
+        password_hash = voting_system.hash_password(password)
+        
+        cursor = voting_system.conn.cursor()
+        cursor.execute("SELECT id, username FROM users WHERE username = ? AND password_hash = ?", (username, password_hash))
+        user = cursor.fetchone()
+        
+        if user:
+            session['user_id'] = user[0]
+            session['username'] = user[1]
+            session.pop('state', None)
+            return f"✅ Welcome {username}! Type 'vote' to see candidates or 'results' to see current standings."
+        else:
+            session.pop('state', None)
+            return "❌ Invalid credentials. Please try again. Type 'login' to retry."
+    
+    elif state == 'voting':
+        if message in ['1', '2', '3']:
+            if 'user_id' not in session:
+                session.pop('state', None)
+                return "❌ Please login first."
+            
+            candidate_id = int(message)
+            cursor = voting_system.conn.cursor()
+            cursor.execute("SELECT has_voted FROM users WHERE id = ?", (session['user_id'],))
+            user = cursor.fetchone()
+            
+            if user and user[0]:
+                session.pop('state', None)
+                return "❌ You have already voted!"
+            
+            cursor.execute("INSERT INTO votes (user_id, candidate_id, voted_at) VALUES (?, ?, ?)", 
+                           (session['user_id'], candidate_id, datetime.now()))
+            cursor.execute("UPDATE users SET has_voted = TRUE WHERE id = ?", (session['user_id'],))
+            voting_system.conn.commit()
+            session.pop('state', None)
+            
+            candidates = {1: "Alice Johnson", 2: "Bob Smith", 3: "Carol Davis"}
+            return f"✅ Vote cast for {candidates[candidate_id]}! Thank you for voting. 🗳️"
+        else:
+            session.pop('state', None)
+            return "❌ Invalid choice. Type 'vote' to see candidates again or 'help' for commands."
+    
+    # Clear state for certain commands
+    if message in ['logout', 'help', 'results']:
+        session.pop('state', None)
+    
+    if message in ['hello', 'hi', 'start']:
+        return "🤖 Welcome to Voting System Chatbot! Type 'register' to create account or 'login' to sign in."
+    
+    elif message == 'register':
+        session['state'] = 'registering'
+        return "Please choose a username and password (format: username password)"
+    
+    elif message.startswith('register '):
+        parts = message.replace('register ', '').split()
+        if len(parts) < 2:
+            return "❌ Invalid format. Use: register username password"
+        username = parts[0]
+        password = ' '.join(parts[1:])
+        password_hash = voting_system.hash_password(password)
+        
+        cursor = voting_system.conn.cursor()
+        try:
+            cursor.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)", (username, password_hash))
+            voting_system.conn.commit()
+            return f"✅ Registered successfully! You can now login with username: {username}"
+        except sqlite3.IntegrityError:
+            return "❌ Username already exists. Please choose another one."
+        except Exception as e:
+            return f"❌ Error during registration: {str(e)}"
+    
+    elif message == 'login':
+        session['state'] = 'logging_in'
+        return "Please enter your username and password (format: username password)"
+    
+    elif message.startswith('login '):
+        parts = message.replace('login ', '').split()
+        if len(parts) < 2:
+            return "❌ Invalid format. Use: login username password"
+        username = parts[0]
+        password = ' '.join(parts[1:])
+        password_hash = voting_system.hash_password(password)
+        
+        cursor = voting_system.conn.cursor()
+        cursor.execute("SELECT id, username FROM users WHERE username = ? AND password_hash = ?", (username, password_hash))
+        user = cursor.fetchone()
+        
+        if user:
+            session['user_id'] = user[0]
+            session['username'] = user[1]
+            return f"✅ Welcome {username}! Type 'vote' to see candidates or 'results' to see current standings."
+        else:
+            return "❌ Invalid credentials. Please try again."
+    
+    elif message == 'vote':
+        if 'user_id' not in session:
+            return "❌ Please login first using 'login' command"
+        
+        cursor = voting_system.conn.cursor()
+        cursor.execute("SELECT has_voted FROM users WHERE id = ?", (session['user_id'],))
+        user = cursor.fetchone()
+        
+        if user and user[0]:
+            return "❌ You have already voted!"
+        
+        session['state'] = 'voting'
+        return """🗳️ Student Council Election 2024
+
+Candidates:
+1. Alice Johnson - Progress Party
+2. Bob Smith - Unity Alliance  
+3. Carol Davis - Future Forward
+
+Type the candidate number to vote (1, 2, or 3)"""
+    
+    elif message == 'results':
+        cursor = voting_system.conn.cursor()
+        cursor.execute('''
+            SELECT candidate_id, COUNT(*) as vote_count 
+            FROM votes 
+            GROUP BY candidate_id 
+            ORDER BY vote_count DESC
+        ''')
+        results = cursor.fetchall()
+        
+        candidates = {1: "Alice Johnson", 2: "Bob Smith", 3: "Carol Davis"}
+        response = "📊 Election Results:\n\n"
+        total_votes = sum(result[1] for result in results)
+        
+        for candidate_id, votes in results:
+            percentage = (votes / total_votes * 100) if total_votes > 0 else 0
+            response += f"• {candidates.get(candidate_id, 'Unknown')}: {votes} votes ({percentage:.1f}%)\n"
+        
+        response += f"\nTotal votes: {total_votes}"
+        if total_votes == 0:
+            response = "📊 No votes have been cast yet."
+        return response
+    
+    elif message == 'logout':
+        session.clear()
+        return "✅ Logged out successfully!"
+    
+    elif message == 'help':
+        return """📖 Available Commands:
+• register - Create new account (or register username password)
+• login - Sign in to your account (or login username password)
+• vote - Cast your vote
+• results - View current results
+• logout - Sign out
+• help - Show this help message"""
+    
+    else:
+        return "❌ I didn't understand that. Type 'help' for available commands."
+
+if __name__ == '__main__':
+    app.run(debug=True)

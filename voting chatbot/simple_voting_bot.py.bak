@@ -1,0 +1,188 @@
+# Save as simple_voting_bot.py
+import sqlite3
+import hashlib
+from datetime import datetime
+
+class SimpleVotingChatbot:
+    def __init__(self):
+        self.setup_database()
+        self.current_user = None
+        
+    def setup_database(self):
+        self.conn = sqlite3.connect('simple_voting.db')
+        cursor = self.conn.cursor()
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE,
+                password_hash TEXT,
+                has_voted BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                candidate_name TEXT,
+                voted_at DATETIME
+            )
+        ''')
+        self.conn.commit()
+    
+    def hash_password(self, password):
+        return hashlib.sha256(password.encode()).hexdigest()
+    
+    def start_chat(self):
+        print("🤖 Welcome to Simple Voting Chatbot!")
+        print("Type 'help' for commands or 'quit' to exit\n")
+        
+        while True:
+            if self.current_user:
+                prompt = f"[{self.current_user}]> "
+            else:
+                prompt = "> "
+            
+            message = input(prompt).strip().lower()
+            
+            if message in ['quit', 'exit']:
+                print("Goodbye! 👋")
+                break
+            elif message == 'help':
+                self.show_help()
+            elif message == 'register':
+                self.register()
+            elif message == 'login':
+                self.login()
+            elif message == 'vote':
+                self.vote()
+            elif message == 'results':
+                self.show_results()
+            elif message == 'logout':
+                self.logout()
+            else:
+                print("❌ Unknown command. Type 'help' for available commands.")
+    
+    def show_help(self):
+        print("\n📖 Available Commands:")
+        print("register - Create new account")
+        print("login    - Sign in to your account")
+        print("vote     - Cast your vote")
+        print("results  - View current results")
+        print("logout   - Sign out")
+        print("help     - Show this help")
+        print("quit     - Exit the program\n")
+    
+    def register(self):
+        username = input("Choose username: ").strip()
+        password = input("Choose password: ").strip()
+        
+        if not username or not password:
+            print("❌ Username and password cannot be empty")
+            return
+        
+        password_hash = self.hash_password(password)
+        cursor = self.conn.cursor()
+        
+        try:
+            cursor.execute(
+                "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                (username, password_hash)
+            )
+            self.conn.commit()
+            print("✅ Registration successful! You can now login.")
+        except sqlite3.IntegrityError:
+            print("❌ Username already exists. Please choose another one.")
+    
+    def login(self):
+        username = input("Username: ").strip()
+        password = input("Password: ").strip()
+        
+        password_hash = self.hash_password(password)
+        cursor = self.conn.cursor()
+        
+        cursor.execute(
+            "SELECT id, username, has_voted FROM users WHERE username = ? AND password_hash = ?",
+            (username, password_hash)
+        )
+        user = cursor.fetchone()
+        
+        if user:
+            self.current_user = user[1]
+            print(f"✅ Welcome {self.current_user}!")
+        else:
+            print("❌ Invalid credentials.")
+    
+    def vote(self):
+        if not self.current_user:
+            print("❌ Please login first.")
+            return
+        
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT has_voted FROM users WHERE username = ?", (self.current_user,))
+        user = cursor.fetchone()
+        
+        if user and user[0]:
+            print("❌ You have already voted!")
+            return
+        
+        print("\n🗳️ Available Candidates:")
+        print("1. Alice Johnson")
+        print("2. Bob Smith")
+        print("3. Carol Davis")
+        
+        choice = input("\nEnter candidate number (1-3): ").strip()
+        
+        if choice in ['1', '2', '3']:
+            candidates = {'1': 'Alice Johnson', '2': 'Bob Smith', '3': 'Carol Davis'}
+            candidate_name = candidates[choice]
+            
+            # Get user ID
+            cursor.execute("SELECT id FROM users WHERE username = ?", (self.current_user,))
+            user_id = cursor.fetchone()[0]
+            
+            # Record vote
+            cursor.execute(
+                "INSERT INTO votes (user_id, candidate_name, voted_at) VALUES (?, ?, ?)",
+                (user_id, candidate_name, datetime.now())
+            )
+            cursor.execute(
+                "UPDATE users SET has_voted = TRUE WHERE username = ?",
+                (self.current_user,)
+            )
+            self.conn.commit()
+            
+            print(f"✅ Vote cast for {candidate_name}! Thank you for voting. 🗳️")
+        else:
+            print("❌ Invalid choice. Please select 1, 2, or 3.")
+    
+    def show_results(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT candidate_name, COUNT(*) as vote_count 
+            FROM votes 
+            GROUP BY candidate_name 
+            ORDER BY vote_count DESC
+        ''')
+        results = cursor.fetchall()
+        
+        print("\n📊 Election Results:")
+        total_votes = sum(result[1] for result in results)
+        
+        for candidate, votes in results:
+            percentage = (votes / total_votes * 100) if total_votes > 0 else 0
+            print(f"• {candidate}: {votes} votes ({percentage:.1f}%)")
+        
+        print(f"\nTotal votes: {total_votes}")
+    
+    def logout(self):
+        if self.current_user:
+            print(f"✅ Goodbye {self.current_user}!")
+            self.current_user = None
+        else:
+            print("❌ You are not logged in.")
+
+if __name__ == "__main__":
+    chatbot = SimpleVotingChatbot()
+    chatbot.start_chat()
